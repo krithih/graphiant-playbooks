@@ -2310,6 +2310,385 @@ class GraphiantPortalClient:
             )
             raise e
 
+    # Local Extranet API Methods
+
+    def create_local_extranet_policy(self, policy_config: dict) -> dict:
+        """
+        Create a new Local Extranet policy.
+
+        POST /v1/extranets (bound in graphiant-sdk >= 26.7.0 as ``v1_extranets_post``).
+        Unlike Data Exchange, this is single-enterprise (no producer/consumer split): a
+        LAN segment (``sharedSegment``) is shared with other LAN segments
+        (``targetSegments``) across sites/branches within the same tenant.
+
+        Args:
+            policy_config (dict): Policy configuration (``ManaV2ExtranetPolicyInput`` shape:
+                name, type, description, sharedSegment, targetSegments, source, branches,
+                hostPrefixSet, sharedPrefixes, auto, manual) with names already resolved to IDs.
+
+        Returns:
+            dict: Created policy response (contains "id").
+        """
+        request_body = {"policy": policy_config}
+        if getattr(self, "check_mode", False):
+            # Validate against the real SDK request model so schema mismatches / a too-old
+            # installed graphiant-sdk surface in check mode too (see create_data_exchange_services).
+            try:
+                validated_payload_dict = graphiant_sdk.V1ExtranetsPostRequest.model_validate(request_body).to_dict()
+            except Exception as sdk_e:
+                raise ValidationError(
+                    f"create_local_extranet_policy: Payload failed SDK schema validation: {sdk_e}"
+                ) from sdk_e
+            LOG.info(
+                "[check_mode] create_local_extranet_policy would create: %s",
+                json.dumps(validated_payload_dict, indent=2),
+            )
+            return {"id": 0}
+        try:
+            LOG.info("create_local_extranet_policy: Creating policy '%s'", policy_config.get("name"))
+            response = self.api.v1_extranets_post(
+                authorization=self.bearer_token, v1_extranets_post_request=request_body
+            )
+            policy_id = getattr(response, "id", None) or getattr(getattr(response, "policy", None), "id", None)
+            LOG.info("create_local_extranet_policy: Successfully created policy with ID: %s", policy_id)
+            result = response.model_dump(by_alias=True, exclude_none=True)
+            result["id"] = policy_id
+            return result
+        except ApiException as e:
+            api_url = f"{self.api.api_client.configuration.host}/v1/extranets"
+            self._log_api_error(
+                method_name="create_local_extranet_policy", api_url=api_url, request_body=request_body, exception=e
+            )
+            raise e
+
+    def get_local_extranet_policies(self, type_filter: Optional[str] = None) -> list:
+        """
+        Get Local Extranet policies.
+
+        GET /v1/extranets(?type=<type_filter>) — called via a raw API request rather than the
+        SDK-bound ``v1_extranets_get``, which takes no query parameters at all.
+
+        Args:
+            type_filter (str, optional): When given, passed through as the ``type`` query
+                param (e.g. ``"enterprise"``, matching the portal UI's own "Local Services >
+                Extranet" list view, confirmed via its browser network request). When None
+                (the default), no filter is applied and every policy is returned regardless of
+                its ``type`` value.
+
+                Deliberately NOT the default for lookups used by create/update/delete's
+                idempotency checks (get_local_extranet_policy_by_name): a policy created with
+                an unexpected/legacy ``type`` value would be invisible to a filtered lookup,
+                while still physically existing and blocking a fresh create on the same name
+                via the backend's (enterpriseId, name) uniqueness constraint — an unrecoverable
+                deadlock (can't create: name taken; can't find-to-delete: filtered out).
+                Use type_filter="enterprise" only for display purposes (get_policies_summary),
+                where matching the portal UI's own view is the actual goal.
+
+        Returns:
+            list: List of ManaV2ExtranetPolicy entries (empty list if none found).
+        """
+        api_url = f"{self.api.api_client.configuration.host}/v1/extranets"
+        query_params = {"type": type_filter} if type_filter else {}
+        try:
+            LOG.info("get_local_extranet_policies: Retrieving Local Extranet policies (type_filter=%s)", type_filter)
+            api_client = self.api.api_client
+            method, url, header_params, body, post_params = api_client.param_serialize(
+                "GET",
+                "/v1/extranets",
+                query_params=query_params,
+                header_params={
+                    "Authorization": self.bearer_token,
+                    "Accept": "application/json",
+                },
+                body=None,
+            )
+            response_data = api_client.call_api(method, url, header_params, body, post_params)
+            response_data.read()
+            self._raise_for_raw_status(response_data)
+            raw = json.loads(response_data.data)
+            policies = [graphiant_sdk.ManaV2ExtranetPolicy.model_validate(item) for item in raw.get("policies") or []]
+            LOG.info("get_local_extranet_policies: Successfully retrieved %s policies", len(policies))
+            return policies
+        except ApiException as e:
+            self._log_api_error(method_name="get_local_extranet_policies", api_url=api_url, exception=e)
+            return []
+
+    def get_local_extranet_policy_by_name(self, policy_name: str):
+        """
+        Get a specific Local Extranet policy by name.
+
+        Args:
+            policy_name (str): Name of the policy to retrieve
+
+        Returns:
+            ManaV2ExtranetPolicy or None: Policy if found, None otherwise.
+        """
+        try:
+            LOG.info("get_local_extranet_policy_by_name: Looking for policy '%s'", policy_name)
+            policies = self.get_local_extranet_policies()
+            for policy in policies:
+                if policy.name == policy_name:
+                    LOG.info("get_local_extranet_policy_by_name: Found policy '%s' with ID: %s", policy_name, policy.id)
+                    return policy
+            LOG.info("get_local_extranet_policy_by_name: Policy '%s' not found", policy_name)
+            return None
+        except Exception as e:
+            LOG.error("get_local_extranet_policy_by_name: Error finding policy '%s': %s", policy_name, e)
+            return None
+
+    def get_local_extranet_policy_details(self, policy_id: int) -> dict:
+        """
+        Get detailed information about a specific Local Extranet policy.
+
+        GET /v1/extranets/{id} (bound as ``v1_extranets_id_get``).
+
+        Args:
+            policy_id (int): ID of the policy to retrieve
+
+        Returns:
+            dict: Policy details (``policy`` object, e.g. sharedSegment/targetSegments
+                expanded to full LAN segment objects rather than bare IDs).
+        """
+        try:
+            LOG.info("get_local_extranet_policy_details: Retrieving policy ID %s", policy_id)
+            response = self.api.v1_extranets_id_get(authorization=self.bearer_token, id=policy_id)
+            policy = response.policy.to_dict() if response and response.policy else {}
+            LOG.info("get_local_extranet_policy_details: Successfully retrieved policy ID %s", policy_id)
+            return policy
+        except ApiException as e:
+            api_url = f"{self.api.api_client.configuration.host}/v1/extranets/{policy_id}"
+            self._log_api_error(
+                method_name="get_local_extranet_policy_details",
+                api_url=api_url,
+                path_params={"id": policy_id},
+                exception=e,
+            )
+            raise e
+
+    def edit_local_extranet_policy(self, policy_id: int, policy_config: dict) -> dict:
+        """
+        Update an existing Local Extranet policy.
+
+        PUT /v1/extranets/{id} — called via a raw API request rather than the SDK-bound
+        ``v1_extranets_id_put``. That method's ``ManaV2ExtranetPolicyInput.type`` field is
+        typed ``StrictStr``, so the typed call can only ever send ``type`` as a JSON string
+        (or omit it). A live capture of the portal UI's own successful update request showed
+        ``"type": 2`` as a genuine JSON *integer* — sending the string ``"2"`` (or
+        ``"enterprise"``) failed with a backend foreign-key constraint violation
+        (``extranet_policy_type_fkey``), and omitting ``type`` entirely failed the exact same
+        way. Only a real JSON int satisfies the backend's update path, which this raw call
+        can send (the underlying ``ApiClient.rest_client.request`` does a plain
+        ``json.dumps(body)`` when Content-Type is JSON, preserving a Python ``int`` as a JSON
+        number) but the pydantic-typed SDK method cannot.
+
+        Args:
+            policy_id (int): ID of the policy to update
+            policy_config (dict): Full desired policy configuration (names already resolved
+                to IDs). ``type`` is expected to already be the Python int ``2``, not a
+                string — see ``local_extranet_manager._resolve_policy_ids``.
+
+        Returns:
+            dict: Updated policy response (contains "id").
+        """
+        request_body = {"policy": policy_config}
+        api_url = f"{self.api.api_client.configuration.host}/v1/extranets/{policy_id}"
+        if getattr(self, "check_mode", False):
+            LOG.info(
+                "[check_mode] edit_local_extranet_policy would update policy ID %s: %s",
+                policy_id,
+                json.dumps(request_body, indent=2),
+            )
+            return {"id": policy_id}
+        try:
+            LOG.info("edit_local_extranet_policy: Updating policy ID %s", policy_id)
+            api_client = self.api.api_client
+            method, url, header_params, body, post_params = api_client.param_serialize(
+                "PUT",
+                "/v1/extranets/{id}",
+                path_params={"id": policy_id},
+                header_params={
+                    "Authorization": self.bearer_token,
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                body=request_body,
+            )
+            response_data = api_client.call_api(method, url, header_params, body, post_params)
+            response_data.read()
+            self._raise_for_raw_status(response_data)
+            result = json.loads(response_data.data) if response_data.data else {}
+            result["id"] = policy_id
+            LOG.info("edit_local_extranet_policy: Successfully updated policy ID %s", policy_id)
+            return result
+        except ApiException as e:
+            self._log_api_error(
+                method_name="edit_local_extranet_policy",
+                api_url=api_url,
+                path_params={"id": policy_id},
+                request_body=request_body,
+                exception=e,
+            )
+            raise e
+
+    def delete_local_extranet_policy(self, policy_id: int):
+        """
+        Delete a Local Extranet policy.
+
+        DELETE /v1/extranets/{id} (bound as ``v1_extranets_id_delete``).
+
+        Args:
+            policy_id (int): ID of the policy to delete
+
+        Returns:
+            API response (contains affected device statuses).
+        """
+        if getattr(self, "check_mode", False):
+            LOG.info("[check_mode] delete_local_extranet_policy would delete policy with ID: %s", policy_id)
+            return type("MockResponse", (), {})()
+        try:
+            LOG.info("delete_local_extranet_policy: Deleting policy with ID: %s", policy_id)
+            response = self.api.v1_extranets_id_delete(authorization=self.bearer_token, id=policy_id)
+            LOG.info("delete_local_extranet_policy: Successfully deleted policy with ID: %s", policy_id)
+            return response
+        except ApiException as e:
+            api_url = f"{self.api.api_client.configuration.host}/v1/extranets/{policy_id}"
+            self._log_api_error(
+                method_name="delete_local_extranet_policy",
+                api_url=api_url,
+                path_params={"id": policy_id},
+                exception=e,
+            )
+            raise e
+
+    def apply_local_extranet_policy(self, policy_id: int, target_device_ids: Optional[list] = None) -> dict:
+        """
+        Push a Local Extranet policy to devices.
+
+        POST /v1/extranets/{id}/apply (bound as ``v1_extranets_id_apply_post``).
+
+        Args:
+            policy_id (int): ID of the policy to apply
+            target_device_ids (list, optional): Device IDs to push to. When omitted/empty,
+                ``targetDevices`` is left out of the request body and the API applies the
+                policy to all applicable devices (source/branch sites) on its own.
+
+        Returns:
+            dict: Response containing per-device status and a jobId.
+        """
+        request_body = {"targetDevices": target_device_ids} if target_device_ids else {}
+        if getattr(self, "check_mode", False):
+            LOG.info(
+                "[check_mode] apply_local_extranet_policy would apply policy ID %s: %s",
+                policy_id,
+                json.dumps(request_body, indent=2),
+            )
+            return {"devices": [], "jobId": 0}
+        try:
+            LOG.info("apply_local_extranet_policy: Applying policy ID %s", policy_id)
+            response = self.api.v1_extranets_id_apply_post(
+                authorization=self.bearer_token, id=policy_id, v1_extranets_id_apply_post_request=request_body
+            )
+            LOG.info("apply_local_extranet_policy: Successfully applied policy ID %s", policy_id)
+            return response.model_dump(by_alias=True, exclude_none=True)
+        except ApiException as e:
+            api_url = f"{self.api.api_client.configuration.host}/v1/extranets/{policy_id}/apply"
+            self._log_api_error(
+                method_name="apply_local_extranet_policy",
+                api_url=api_url,
+                path_params={"id": policy_id},
+                request_body=request_body,
+                exception=e,
+            )
+            raise e
+
+    def get_local_extranet_policy_device_status(self, policy_id: int) -> list:
+        """
+        Get per-device push/rollout status for a Local Extranet policy.
+
+        GET /v1/extranets/{id}/status (bound as ``v1_extranets_id_status_get``).
+
+        Args:
+            policy_id (int): ID of the policy
+
+        Returns:
+            list: ManaV2ExtranetDeviceStatus entries (empty list if none found).
+        """
+        try:
+            LOG.info("get_local_extranet_policy_device_status: Retrieving device status for policy ID %s", policy_id)
+            response = self.api.v1_extranets_id_status_get(authorization=self.bearer_token, id=policy_id)
+            devices = response.devices if response and response.devices else []
+            LOG.info("get_local_extranet_policy_device_status: Retrieved status for %s device(s)", len(devices))
+            return devices
+        except ApiException as e:
+            api_url = f"{self.api.api_client.configuration.host}/v1/extranets/{policy_id}/status"
+            self._log_api_error(
+                method_name="get_local_extranet_policy_device_status",
+                api_url=api_url,
+                path_params={"id": policy_id},
+                exception=e,
+            )
+            raise e
+
+    def get_local_extranet_lan_segments_usage(
+        self, policy_id: Optional[int] = None, is_provider: Optional[bool] = None
+    ):
+        """
+        Get LAN segment usage/monitoring info for Local Extranet.
+
+        GET /v1/extranets/monitoring/lan-segments (bound as
+        ``v1_extranets_monitoring_lan_segments_get``).
+
+        Args:
+            policy_id (int, optional): Extranet policy ID to filter by.
+            is_provider (bool, optional): Provider vs consumer view.
+
+        Returns:
+            API response object with a ``vrfs`` list.
+        """
+        try:
+            LOG.info("get_local_extranet_lan_segments_usage: Retrieving LAN segment usage (policy_id=%s)", policy_id)
+            response = self.api.v1_extranets_monitoring_lan_segments_get(
+                authorization=self.bearer_token, id=policy_id, is_provider=is_provider
+            )
+            LOG.info("get_local_extranet_lan_segments_usage: Successfully retrieved LAN segment usage")
+            return response
+        except ApiException as e:
+            api_url = f"{self.api.api_client.configuration.host}/v1/extranets/monitoring/lan-segments"
+            self._log_api_error(
+                method_name="get_local_extranet_lan_segments_usage",
+                api_url=api_url,
+                query_params={"id": policy_id, "is_provider": is_provider},
+                exception=e,
+            )
+            raise e
+
+    def get_local_extranet_nat_usage(self, policy_id: int):
+        """
+        Get NAT pool usage/monitoring info for a Local Extranet policy.
+
+        GET /v1/extranets/monitoring/nat-usage (bound as ``v1_extranets_monitoring_nat_usage_get``).
+
+        Args:
+            policy_id (int): Extranet policy ID.
+
+        Returns:
+            API response object with allocatedCount/usageCount/allocations.
+        """
+        try:
+            LOG.info("get_local_extranet_nat_usage: Retrieving NAT usage for policy ID %s", policy_id)
+            response = self.api.v1_extranets_monitoring_nat_usage_get(authorization=self.bearer_token, id=policy_id)
+            LOG.info("get_local_extranet_nat_usage: Successfully retrieved NAT usage for policy ID %s", policy_id)
+            return response
+        except ApiException as e:
+            api_url = f"{self.api.api_client.configuration.host}/v1/extranets/monitoring/nat-usage"
+            self._log_api_error(
+                method_name="get_local_extranet_nat_usage",
+                api_url=api_url,
+                path_params={"id": policy_id},
+                exception=e,
+            )
+            raise e
+
     def get_ipsec_inside_subnet(self, region_id, lan_segment_id, address_family):
         """
         Get IPSec inside subnet for a specific region and LAN segment.

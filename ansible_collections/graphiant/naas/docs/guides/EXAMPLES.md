@@ -3754,6 +3754,151 @@ ansible-playbook playbooks/de_workflows/05_dataex_delete_services.yml
     msg: "{{ delete_services_result.msg }}"
 ```
 
+## Local Extranet Workflows
+
+Local Extranet shares a LAN segment (VRF) with other LAN segments across sites/branches within the
+**same** enterprise — unlike [Data Exchange Workflows](#data-exchange-workflows) (cross-enterprise
+B2B peering with producer/customer/match/invitation entities), it is a flat, single-resource policy
+CRUD with no counterpart enterprise involved. After a successful create or update, the policy is
+automatically pushed to devices (equivalent to the `/v1/extranets/{id}/apply` API) — there is no
+separate "apply" operation to run.
+
+### Step 1: Create Local Extranet policies
+
+```bash
+ansible-playbook playbooks/local_extranet_management.yml --tags create --check --diff
+ansible-playbook playbooks/local_extranet_management.yml --tags create
+```
+
+```yaml
+- name: Create Local Extranet policies
+  graphiant.naas.graphiant_local_extranet:
+    host: "{{ graphiant_host }}"
+    username: "{{ graphiant_username }}"
+    password: "{{ graphiant_password }}"
+    operation: create_policies
+    config_file: "sample_local_extranet_policies.yaml"
+    detailed_logs: true
+  register: create_policies_result
+
+- name: Display policy creation result
+  ansible.builtin.debug:
+    msg: "{{ create_policies_result.msg }}"
+```
+
+Each policy entry requires `name`, `sharedSegment` (LAN segment name shared with other
+segments), and `targetSegments` (list of LAN segment names allowed to consume it). Optional
+`source` and `branches` blocks scope the shared-segment side and consuming side, respectively.
+Optional `source.sites`/`branches.sites` scope which
+sites participate, resolved from names to IDs automatically; `excludedDevices` is optional and
+defaults to an empty list when omitted. `type` is not
+configurable and is not exposed in the portal UI either. Its required wire
+value differs by operation, confirmed against live captures: `create_policies` sends the string
+`"enterprise"` (a numeric string like `"2"`, matching the portal's own create request, also lets
+create succeed but produces a policy the list endpoint's `?type=enterprise` filter — what the
+portal UI's own list view queries — can't find); `update_policies` sends the raw JSON integer `2`
+via a direct API call, since the same string value (or omitting `type` entirely) fails update with
+a backend foreign-key constraint violation, and only a genuine integer (confirmed via the portal
+UI's own successful update request) satisfies it.
+
+Existence checks for `create_policies`/`update_policies`/`delete_policies` and the info module's
+`policies_summary`/`policy_device_status` never filter by `type` — only the portal UI's own list
+view does. A policy with an unexpected `type` (e.g. one left over from before this was fixed)
+would otherwise be invisible to a type-filtered lookup while still blocking a fresh create under
+the same name via the backend's (enterpriseId, name) uniqueness constraint — an unrecoverable
+deadlock. This module avoids that by always seeing every policy regardless of `type`.
+
+Optional `source.prefixSet`/`branches.prefixSet` restricts which prefixes from the shared segment
+are advertised (omit entirely to share all prefixes). Each `entries` item needs `ipPrefix`;
+`maskLower`/`maskUpper` are optional and further restrict `ipPrefix` to only the subnets within
+that mask-length range (matches the portal UI's Exact/Range/Less & Equal/Greater & Equal rule
+dropdown). Defaults depend on which are given: neither given → both default to `ipPrefix`'s own
+mask length (exact match); only `maskUpper` given → `maskLower` defaults to `ipPrefix`'s own mask
+length; only `maskLower` given → `maskUpper` defaults to 32; both given → used as-is. `ipPrefix`
+(and `manual.prefixes`, if used) are validated as properly-aligned CIDR network addresses, the
+same check used by Data Exchange's `prefixTags`.
+
+On `update_policies`, the existing prefix-set object's `id` is automatically carried over from the
+current policy so the update modifies it in place — omitting it causes the backend to treat the
+request as creating a new prefix-set with the same name, which fails with "Prefix-set already
+exists" (confirmed via a live update).
+
+An existing policy (matched by `name`) is skipped (idempotent). Optional `targetDevices` (device
+names) controls which devices the policy is pushed to on apply; when omitted, the API applies the
+policy to all applicable devices.
+
+### Step 2: Update Local Extranet policies
+
+Unlike Data Exchange (where only a single field is mutable per service type), the full policy is
+mutable here. The policy must already exist; use `create_policies` for new policies.
+
+`sample_local_extranet_policies_update.yaml` has the same policy `name` as
+`sample_local_extranet_policies.yaml`, with a `maskLower`/`maskUpper` range restriction added to
+the `source.prefixSet` entry:
+
+```bash
+ansible-playbook playbooks/local_extranet_management.yml --tags update --check --diff
+ansible-playbook playbooks/local_extranet_management.yml --tags update
+```
+
+```yaml
+- name: Update Local Extranet policies
+  graphiant.naas.graphiant_local_extranet:
+    host: "{{ graphiant_host }}"
+    username: "{{ graphiant_username }}"
+    password: "{{ graphiant_password }}"
+    operation: update_policies
+    config_file: "sample_local_extranet_policies_update.yaml"
+    detailed_logs: true
+  register: update_policies_result
+```
+
+### Step 3: Query policies and device status
+
+```bash
+ansible-playbook playbooks/local_extranet_management.yml --tags query
+```
+
+```yaml
+- name: Get Local Extranet policies summary
+  graphiant.naas.graphiant_local_extranet_info:
+    <<: *graphiant_client_params
+    query: policies_summary
+    detailed_logs: true
+  register: policies_summary
+
+- name: Get device rollout status for a policy
+  graphiant.naas.graphiant_local_extranet_info:
+    <<: *graphiant_client_params
+    query: policy_device_status
+    policy_name: "local-extranet-policy-1"
+    detailed_logs: true
+  register: device_status
+```
+
+`lan_segments_usage` and `nat_usage` queries are also available for monitoring LAN segment and NAT
+pool consumption — see `graphiant_local_extranet_info` module docs (`ansible-doc
+graphiant.naas.graphiant_local_extranet_info`) for details.
+
+### Step 4: Delete Local Extranet policies
+
+```bash
+ansible-playbook playbooks/local_extranet_management.yml --tags delete
+```
+
+```yaml
+- name: Delete Local Extranet policies
+  graphiant.naas.graphiant_local_extranet:
+    host: "{{ graphiant_host }}"
+    username: "{{ graphiant_username }}"
+    password: "{{ graphiant_password }}"
+    operation: delete_policies
+    config_file: "sample_local_extranet_policies.yaml"
+  register: delete_policies_result
+```
+
+A policy not found by `name` is skipped (idempotent).
+
 ## Raw Device Configuration (graphiant_device_config)
 
 `graphiant_device_config` is a **generic, low-level module** that pushes any JSON payload directly to the Graphiant device config API (`PUT /v1/devices/{id}/config`). Use it as an escape hatch when the structured modules (`graphiant_interfaces`, `graphiant_ntp`, etc.) do not yet cover a specific configuration field — anything the Portal UI can configure can be pushed with this module.

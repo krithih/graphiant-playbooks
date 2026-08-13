@@ -1443,6 +1443,75 @@ class TestGraphiantPlaybooks(unittest.TestCase):
             self.assertIn(r["status"], ("check_mode", "skipped"),
                           f"Unexpected status '{r['status']}' for {r.get('customer_name')}")
 
+    def test_create_local_extranet_policies(self):
+        """
+        Create Local Extranet policies.
+
+        Second run should be idempotent (changed=False, skipped, nothing created).
+        """
+        graphiant_config = graphiant_config_from_read_config()
+
+        result = graphiant_config.local_extranet.create_policies("sample_local_extranet_policies.yaml")
+        LOG.info("Create Local Extranet policies result: %s", result)
+
+        result2 = graphiant_config.local_extranet.create_policies("sample_local_extranet_policies.yaml")
+        LOG.info("Create Local Extranet policies result (idempotency check): %s", result2)
+        self.assertFalse(result2["changed"], f"Expected no change on idempotent create_policies, got: {result2}")
+        self.assertTrue(result2["skipped"], f"Expected policies to be skipped, got: {result2}")
+        self.assertFalse(result2["created"], f"Expected no new policies to be created, got: {result2}")
+
+    def test_get_local_extranet_policies_summary(self):
+        """
+        Get Local Extranet policies summary.
+        """
+        graphiant_config = graphiant_config_from_read_config()
+        graphiant_config.local_extranet.get_policies_summary()
+
+    def test_update_local_extranet_policies(self):
+        """
+        Update Local Extranet policies (adds a second sharedPrefixes entry).
+
+        Second run should be idempotent (changed=False) since the desired state already matches.
+        """
+        graphiant_config = graphiant_config_from_read_config()
+        updated_config_path = "sample_local_extranet_policies_update.yaml"
+
+        result = graphiant_config.local_extranet.update_policies(updated_config_path)
+        LOG.info("Update Local Extranet policies result: %s", result)
+        self.assertTrue(result["changed"], f"Expected update to change the policy, got: {result}")
+
+        result2 = graphiant_config.local_extranet.update_policies(updated_config_path)
+        LOG.info("Update Local Extranet policies result (idempotency check): %s", result2)
+        self.assertFalse(result2["changed"], f"Expected no change on idempotent update, got: {result2}")
+        self.assertTrue(result2["skipped"], f"Expected policy to be skipped, got: {result2}")
+
+    def test_update_local_extranet_policies_restore(self):
+        """
+        Restore Local Extranet policies to their original sharedPrefixes after the update test.
+        """
+        graphiant_config = graphiant_config_from_read_config()
+        result = graphiant_config.local_extranet.update_policies(
+            "sample_local_extranet_policies.yaml"
+        )
+        self.assertTrue(result["changed"], f"Expected restore to change the policy, got: {result}")
+
+    def test_delete_local_extranet_policies(self):
+        """
+        Delete Local Extranet policies.
+
+        Second run should be idempotent (changed=False, skipped, nothing deleted).
+        """
+        graphiant_config = graphiant_config_from_read_config()
+
+        result = graphiant_config.local_extranet.delete_policies("sample_local_extranet_policies.yaml")
+        LOG.info("Delete Local Extranet policies result: %s", result)
+
+        result2 = graphiant_config.local_extranet.delete_policies("sample_local_extranet_policies.yaml")
+        LOG.info("Delete Local Extranet policies result (idempotency check): %s", result2)
+        self.assertFalse(result2["changed"], f"Expected no change on idempotent delete_policies, got: {result2}")
+        self.assertTrue(result2["skipped"], f"Expected policies to be skipped, got: {result2}")
+        self.assertFalse(result2["deleted"], f"Expected no policies to be deleted, got: {result2}")
+
     def test_show_validated_payload_for_device_config(self):
         """
         Show validated payload for device configuration.
@@ -2776,6 +2845,16 @@ if __name__ == '__main__':
     suite.addTest(TestGraphiantPlaybooks('test_delete_data_exchange_services'))
     suite.addTest(TestGraphiantPlaybooks('test_delete_data_exchange_services_client_to_server'))
     suite.addTest(TestGraphiantPlaybooks('test_delete_data_exchange_services_client_to_server_idempotent'))
+
+    # Local Extranet Tests (Pre-req: LAN segments, configured above for Data Exchange)
+    suite.addTest(TestGraphiantPlaybooks('test_configure_global_lan_segments'))
+    suite.addTest(TestGraphiantPlaybooks('test_configure_interfaces'))
+    suite.addTest(TestGraphiantPlaybooks('test_create_local_extranet_policies'))
+    suite.addTest(TestGraphiantPlaybooks('test_get_local_extranet_policies_summary'))
+    suite.addTest(TestGraphiantPlaybooks('test_update_local_extranet_policies'))
+    suite.addTest(TestGraphiantPlaybooks('test_update_local_extranet_policies_restore'))
+    suite.addTest(TestGraphiantPlaybooks('test_delete_local_extranet_policies'))
+
     suite.addTest(TestGraphiantPlaybooks('test_deconfigure_global_config_graphiant_filters'))
     suite.addTest(TestGraphiantPlaybooks('test_deconfigure_global_config_prefix_lists'))
 
@@ -2849,7 +2928,6 @@ if __name__ == '__main__':
     # Device Configuration Management Tests
     suite.addTest(TestGraphiantPlaybooks('test_show_validated_payload_for_device_config'))
     suite.addTest(TestGraphiantPlaybooks('test_configure_device_config'))
-
     '''
     # Backbone (Core) Configuration Management Tests
     suite.addTest(TestGraphiantPlaybooks('test_configure_backbone'))

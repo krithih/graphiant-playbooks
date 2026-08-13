@@ -5,6 +5,12 @@
 
 ancestor: null
 releases:
+  "26.8.0":
+      release_date: "2026-09-02"
+      changes:
+        minor_changes:
+        - "New ``graphiant_local_extranet`` module and ``local_extranet_management.yml`` playbook for single-tenant intra-enterprise LAN segment sharing across sites/branches; operations ``create_policies`` / ``update_policies`` / ``delete_policies``; policy is auto-applied to devices after create/update (no separate apply step); sample ``sample_local_extranet_policies.yaml`` and update sample ``sample_local_extranet_policies_update.yaml``; idempotent create/delete and before/after comparison on update (prefix sets, sites, excluded devices, target segments all normalized); full check mode and diff mode (``--check --diff`` returns ``details.diff_plan``); unit tests for the manager and both modules plus integration tests in ``tests/test.py`` covering create/update/delete idempotency"
+        - "New ``graphiant_local_extranet_info`` module for querying Local Extranet policy state — ``policies_summary``, ``policy_device_status`` (requires ``policy_name``), ``lan_segments_usage`` (optional ``policy_name``/``is_provider``), ``nat_usage`` (requires ``policy_name``); tabulated output"
   "26.7.0":
     release_date: "2026-08-05"
     changes:

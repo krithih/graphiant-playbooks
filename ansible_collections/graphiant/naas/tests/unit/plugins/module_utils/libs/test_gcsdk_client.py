@@ -853,3 +853,305 @@ def test_accept_data_exchange_service_check_mode_raises_on_invalid_payload() -> 
 
     with pytest.raises(ValidationError):
         client.accept_data_exchange_service(6534, {"id": 8417, "policy": {"sites": "not-a-list"}})
+
+
+# ---- Local Extranet: gcsdk_client wire-level coverage ----
+#
+# Single-tenant flat policy resource (create/get/edit/delete/apply at /v1/extranets), unlike
+# Data Exchange's producer/customer/match split. get_local_extranet_policies and
+# edit_local_extranet_policy use the raw param_serialize()/call_api() pattern (see
+# _raise_for_raw_status above); the rest are typed SDK-bound calls.
+
+
+def _raw_json_response(payload: dict, status: int = 200) -> MagicMock:
+    response = MagicMock(status=status, data=json.dumps(payload).encode())
+    response.read = MagicMock()
+    return response
+
+
+def test_create_local_extranet_policy_returns_id_on_success() -> None:
+    client = _make_client()
+    response = MagicMock()
+    response.id = None
+    response.policy = MagicMock(id=555)
+    response.model_dump.return_value = {"policy": {"name": "local-extranet-policy-1"}}
+    client.api.v1_extranets_post.return_value = response
+
+    result = client.create_local_extranet_policy(
+        {"name": "local-extranet-policy-1", "type": "enterprise", "sharedSegment": 1, "targetSegments": [2, 3]}
+    )
+
+    assert result["id"] == 555
+    kwargs = client.api.v1_extranets_post.call_args.kwargs
+    assert kwargs["v1_extranets_post_request"]["policy"]["sharedSegment"] == 1
+
+
+def test_create_local_extranet_policy_raises_on_error_response() -> None:
+    client = _make_client()
+    client.api.v1_extranets_post.side_effect = ApiException(status=500, reason="sites are required")
+
+    with pytest.raises(ApiException):
+        client.create_local_extranet_policy({"name": "local-extranet-policy-1", "sharedSegment": 1})
+
+
+def test_create_local_extranet_policy_check_mode_validates_payload() -> None:
+    client = _make_client()
+    client.check_mode = True
+
+    result = client.create_local_extranet_policy(
+        {"name": "local-extranet-policy-1", "type": "enterprise", "sharedSegment": 1, "targetSegments": [2, 3]}
+    )
+
+    assert result == {"id": 0}
+    client.api.v1_extranets_post.assert_not_called()
+
+
+def test_create_local_extranet_policy_check_mode_raises_on_invalid_payload() -> None:
+    client = _make_client()
+    client.check_mode = True
+
+    with pytest.raises(ValidationError):
+        client.create_local_extranet_policy({"name": "local-extranet-policy-1", "sharedSegment": "not-an-int"})
+
+
+def test_get_local_extranet_policies_parses_raw_response() -> None:
+    client = _make_client()
+    client.api.api_client.param_serialize.return_value = ("GET", "url", {}, None, {})
+    client.api.api_client.call_api.return_value = _raw_json_response(
+        {"policies": [{"id": 1, "name": "local-extranet-policy-1"}]}
+    )
+
+    result = client.get_local_extranet_policies()
+
+    assert len(result) == 1
+    assert result[0].id == 1
+    assert result[0].name == "local-extranet-policy-1"
+
+
+def test_get_local_extranet_policies_passes_type_filter_query_param() -> None:
+    client = _make_client()
+    client.api.api_client.param_serialize.return_value = ("GET", "url", {}, None, {})
+    client.api.api_client.call_api.return_value = _raw_json_response({"policies": []})
+
+    client.get_local_extranet_policies(type_filter="enterprise")
+
+    kwargs = client.api.api_client.param_serialize.call_args.kwargs
+    assert kwargs["query_params"] == {"type": "enterprise"}
+
+
+def test_get_local_extranet_policies_returns_empty_list_on_error() -> None:
+    """
+    Regression: unlike most gcsdk_client getters, this one swallows the error and returns []
+    rather than propagating — callers (get_local_extranet_policy_by_name, is-in-use checks)
+    depend on a plain empty list, not an exception, when the endpoint is unreachable.
+    """
+    client = _make_client()
+    client.api.api_client.param_serialize.return_value = ("GET", "url", {}, None, {})
+    client.api.api_client.call_api.return_value = _raw_json_response(
+        {"errorCode": 13, "displayError": "boom"}, status=500
+    )
+
+    result = client.get_local_extranet_policies()
+
+    assert result == []
+
+
+def test_get_local_extranet_policy_by_name_found() -> None:
+    client = _make_client()
+    policy = MagicMock(id=7)
+    policy.name = "local-extranet-policy-1"  # "name" is a reserved MagicMock() constructor kwarg
+    with patch.object(client, "get_local_extranet_policies", return_value=[policy]):
+        result = client.get_local_extranet_policy_by_name("local-extranet-policy-1")
+
+    assert result is policy
+
+
+def test_get_local_extranet_policy_by_name_not_found() -> None:
+    client = _make_client()
+    with patch.object(client, "get_local_extranet_policies", return_value=[]):
+        result = client.get_local_extranet_policy_by_name("missing-policy")
+
+    assert result is None
+
+
+def test_get_local_extranet_policy_details_returns_policy_dict() -> None:
+    client = _make_client()
+    policy_obj = MagicMock()
+    policy_obj.to_dict.return_value = {"id": 42, "name": "local-extranet-policy-1"}
+    client.api.v1_extranets_id_get.return_value = MagicMock(policy=policy_obj)
+
+    result = client.get_local_extranet_policy_details(42)
+
+    assert result == {"id": 42, "name": "local-extranet-policy-1"}
+
+
+def test_get_local_extranet_policy_details_raises_on_error_response() -> None:
+    client = _make_client()
+    client.api.v1_extranets_id_get.side_effect = ApiException(status=404, reason="not found")
+
+    with pytest.raises(ApiException):
+        client.get_local_extranet_policy_details(42)
+
+
+def test_edit_local_extranet_policy_success() -> None:
+    client = _make_client()
+    client.api.api_client.param_serialize.return_value = ("PUT", "url", {}, None, {})
+    client.api.api_client.call_api.return_value = _raw_json_response({"policy": {"id": 42}})
+
+    result = client.edit_local_extranet_policy(42, {"name": "local-extranet-policy-1", "type": 2, "sharedSegment": 1})
+
+    assert result["id"] == 42
+    kwargs = client.api.api_client.param_serialize.call_args.kwargs
+    assert kwargs["path_params"] == {"id": 42}
+    assert kwargs["body"]["policy"]["type"] == 2
+
+
+def test_edit_local_extranet_policy_raises_on_non_2xx_status() -> None:
+    """
+    Regression: a raw call_api() error response must actually raise (see
+    _raise_for_raw_status above) rather than being parsed as if it were a success.
+    """
+    client = _make_client()
+    client.api.api_client.param_serialize.return_value = ("PUT", "url", {}, None, {})
+    client.api.api_client.call_api.return_value = _raw_json_response(
+        {"errorCode": 13, "displayError": "policy not found"}, status=500
+    )
+
+    with pytest.raises(ApiException):
+        client.edit_local_extranet_policy(42, {"name": "local-extranet-policy-1"})
+
+
+def test_edit_local_extranet_policy_check_mode_does_not_call_api() -> None:
+    client = _make_client()
+    client.check_mode = True
+
+    result = client.edit_local_extranet_policy(42, {"name": "local-extranet-policy-1"})
+
+    assert result == {"id": 42}
+    client.api.api_client.call_api.assert_not_called()
+
+
+def test_delete_local_extranet_policy_success() -> None:
+    client = _make_client()
+    client.api.v1_extranets_id_delete.return_value = MagicMock()
+
+    client.delete_local_extranet_policy(42)
+
+    client.api.v1_extranets_id_delete.assert_called_once_with(authorization="test-token", id=42)
+
+
+def test_delete_local_extranet_policy_raises_on_error_response() -> None:
+    client = _make_client()
+    client.api.v1_extranets_id_delete.side_effect = ApiException(status=404, reason="not found")
+
+    with pytest.raises(ApiException):
+        client.delete_local_extranet_policy(42)
+
+
+def test_delete_local_extranet_policy_check_mode_does_not_call_api() -> None:
+    client = _make_client()
+    client.check_mode = True
+
+    client.delete_local_extranet_policy(42)
+
+    client.api.v1_extranets_id_delete.assert_not_called()
+
+
+def test_apply_local_extranet_policy_without_target_devices_omits_key() -> None:
+    client = _make_client()
+    client.api.v1_extranets_id_apply_post.return_value = MagicMock(
+        model_dump=MagicMock(return_value={"devices": [], "jobId": 99})
+    )
+
+    result = client.apply_local_extranet_policy(42)
+
+    assert result == {"devices": [], "jobId": 99}
+    kwargs = client.api.v1_extranets_id_apply_post.call_args.kwargs
+    assert kwargs["v1_extranets_id_apply_post_request"] == {}
+
+
+def test_apply_local_extranet_policy_with_target_devices_includes_key() -> None:
+    client = _make_client()
+    client.api.v1_extranets_id_apply_post.return_value = MagicMock(
+        model_dump=MagicMock(return_value={"devices": [], "jobId": 100})
+    )
+
+    client.apply_local_extranet_policy(42, target_device_ids=[1, 2])
+
+    kwargs = client.api.v1_extranets_id_apply_post.call_args.kwargs
+    assert kwargs["v1_extranets_id_apply_post_request"] == {"targetDevices": [1, 2]}
+
+
+def test_apply_local_extranet_policy_raises_on_error_response() -> None:
+    client = _make_client()
+    client.api.v1_extranets_id_apply_post.side_effect = ApiException(status=500, reason="apply failed")
+
+    with pytest.raises(ApiException):
+        client.apply_local_extranet_policy(42)
+
+
+def test_apply_local_extranet_policy_check_mode_does_not_call_api() -> None:
+    client = _make_client()
+    client.check_mode = True
+
+    result = client.apply_local_extranet_policy(42, target_device_ids=[1])
+
+    assert result == {"devices": [], "jobId": 0}
+    client.api.v1_extranets_id_apply_post.assert_not_called()
+
+
+def test_get_local_extranet_policy_device_status_returns_devices() -> None:
+    client = _make_client()
+    devices = [MagicMock(), MagicMock()]
+    client.api.v1_extranets_id_status_get.return_value = MagicMock(devices=devices)
+
+    result = client.get_local_extranet_policy_device_status(42)
+
+    assert result == devices
+
+
+def test_get_local_extranet_policy_device_status_raises_on_error_response() -> None:
+    client = _make_client()
+    client.api.v1_extranets_id_status_get.side_effect = ApiException(status=500, reason="failed")
+
+    with pytest.raises(ApiException):
+        client.get_local_extranet_policy_device_status(42)
+
+
+def test_get_local_extranet_lan_segments_usage_passes_params() -> None:
+    client = _make_client()
+    response = MagicMock()
+    client.api.v1_extranets_monitoring_lan_segments_get.return_value = response
+
+    result = client.get_local_extranet_lan_segments_usage(policy_id=42, is_provider=True)
+
+    assert result is response
+    client.api.v1_extranets_monitoring_lan_segments_get.assert_called_once_with(
+        authorization="test-token", id=42, is_provider=True
+    )
+
+
+def test_get_local_extranet_lan_segments_usage_raises_on_error_response() -> None:
+    client = _make_client()
+    client.api.v1_extranets_monitoring_lan_segments_get.side_effect = ApiException(status=500, reason="failed")
+
+    with pytest.raises(ApiException):
+        client.get_local_extranet_lan_segments_usage()
+
+
+def test_get_local_extranet_nat_usage_returns_response() -> None:
+    client = _make_client()
+    response = MagicMock()
+    client.api.v1_extranets_monitoring_nat_usage_get.return_value = response
+
+    result = client.get_local_extranet_nat_usage(42)
+
+    assert result is response
+
+
+def test_get_local_extranet_nat_usage_raises_on_error_response() -> None:
+    client = _make_client()
+    client.api.v1_extranets_monitoring_nat_usage_get.side_effect = ApiException(status=500, reason="failed")
+
+    with pytest.raises(ApiException):
+        client.get_local_extranet_nat_usage(42)
