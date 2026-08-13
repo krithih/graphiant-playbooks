@@ -146,7 +146,7 @@ ospfv2:
                       # Optional, only meaningful when enabled: true.
                       minimumInterval: 1000
                       # Optional, only meaningful when enabled: true.
-                      multiplier: 3
+                      localMultiplier: 3
 
                   # Interface #2: MD5 authentication instead of BFD.
                   - interfaceName: "GigabitEthernet7/0/0.19"   # REQUIRED

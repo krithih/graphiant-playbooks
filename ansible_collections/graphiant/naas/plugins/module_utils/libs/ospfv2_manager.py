@@ -71,7 +71,7 @@ edge.segments.<segment>.ospfv2.process = {
 from typing import Any, Dict, Iterator, Optional, Tuple
 
 from .base_manager import BaseManager
-from .device_config_common import fetch_device_by_name, format_config_payload_for_log, new_apply_result
+from .device_config_common import fetch_device_by_name, new_apply_result, redact_sensitive_for_log
 from .exceptions import ConfigurationError
 from .logger import setup_logger
 
@@ -92,8 +92,8 @@ class OSPFv2Manager(BaseManager):
             bfd_obj["enabled"] = bfd_cfg.get("enabled")
         if bfd_cfg.get("minimumInterval") is not None:
             bfd_obj["minimumInterval"] = bfd_cfg.get("minimumInterval")
-        if bfd_cfg.get("multiplier") is not None:
-            bfd_obj["multiplier"] = bfd_cfg.get("multiplier")
+        if bfd_cfg.get("localMultiplier") is not None:
+            bfd_obj["localMultiplier"] = bfd_cfg.get("localMultiplier")
         return {"bfd": bfd_obj}
 
     @staticmethod
@@ -160,13 +160,6 @@ class OSPFv2Manager(BaseManager):
                 interface_obj["bfd"] = OSPFv2Manager._build_bfd(if_cfg.get("bfd"))
             else:
                 interface_obj["bfd"] = {"bfd": {"enabled": False, "minimumInterval": None}}
-            # Creation-only legacy flat fields (always zero; real values live in
-            # the *Value siblings above)
-            interface_obj["ifIndex"] = 0
-            interface_obj["helloInterval"] = 0
-            interface_obj["deadInterval"] = 0
-            interface_obj["retransmitInterval"] = 0
-            interface_obj["mtuIgnore"] = False
         else:
             if if_cfg.get("bfd") is not None:
                 interface_obj["bfd"] = OSPFv2Manager._build_bfd(if_cfg.get("bfd"))
@@ -612,7 +605,7 @@ class OSPFv2Manager(BaseManager):
                             "bfd": {
                                 "enabled": True,
                                 "minimumInterval": bfd.get("minimumInterval"),
-                                "multiplier": bfd.get("multiplier"),
+                                "localMultiplier": bfd.get("multiplier"),
                             }
                         }
                     else:
@@ -882,74 +875,6 @@ class OSPFv2Manager(BaseManager):
 
                 yield device_id, device_name, payload, device_dict
 
-    def _push_device_config_preserving_nulls(self, device_id: int, payload: Dict[str, Any]):
-        """
-        PUT one device's OSPFv2 config payload while preserving explicit `null` values.
-
-        Deconfigure payloads built by this manager rely on an explicit `null` (e.g.
-        {"interface": None}, {"protocol": None}) to tell the API "delete this key" --
-        as opposed to omitting the key, which means "leave it untouched" (see the module
-        docstring above). Pushing that payload via gsdk.put_device_config_raw() builds a
-        graphiant_sdk.V1DevicesDeviceIdConfigPutRequest and serializes it through that
-        model's .to_dict() (used both for the log line and for the actual request body) --
-        which calls pydantic's model_dump(exclude_none=True) and silently collapses every
-        explicit None down to an omitted key (e.g. {"interface": None} -> {}). The API then
-        rejects/misinterprets that empty object instead of performing the intended deletion
-        (observed as 500s like "error creating ospf process on device ..."). This method
-        instead builds the request via the SDK's api_client.param_serialize()/call_api()
-        directly, with the raw payload dict as the body -- the same "bypass the typed
-        request model" pattern already used elsewhere in gcsdk_client.py (see
-        edit_data_exchange_customer) for calls that need explicit control over what's on
-        the wire. ApiClient.sanitize_for_serialization() preserves None for plain dicts, so
-        the nulls this payload depends on actually reach the API.
-
-        This is scoped to ospfv2_manager.py deliberately -- gsdk.put_device_config_raw()
-        is shared across many managers, so it is not touched here.
-        """
-        gsdk = self.gsdk
-
-        request_body: Dict[str, Any] = {}
-        if payload.get("edge") is not None:
-            request_body["edge"] = payload["edge"]
-        if payload.get("core") is not None:
-            request_body["core"] = payload["core"]
-
-        if getattr(gsdk, "check_mode", False):
-            LOG.info(
-                "[check_mode] ospfv2: would push config for device_id=%s: \n%s",
-                device_id,
-                format_config_payload_for_log(request_body),
-            )
-            return None
-
-        gsdk.verify_device_portal_status(device_id=device_id)
-        LOG.info(
-            "ospfv2: config to be pushed for %s: \n%s",
-            device_id,
-            format_config_payload_for_log(request_body),
-        )
-
-        api_client = gsdk.api.api_client
-        method, url, header_params, body, post_params = api_client.param_serialize(
-            "PUT",
-            "/v1/devices/{deviceId}/config",
-            path_params={"deviceId": device_id},
-            header_params={
-                "Authorization": gsdk.bearer_token,
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-            body=request_body,
-        )
-        try:
-            response_data = api_client.call_api(method, url, header_params, body, post_params)
-            response_data.read()
-        except Exception as e:
-            raise ConfigurationError(f"ospfv2: config push failed for device {device_id}: {e}") from e
-
-        gsdk.verify_device_portal_status(device_id=device_id)
-        return response_data
-
     def apply_ospf(
         self,
         config_yaml_file: str,
@@ -981,8 +906,8 @@ class OSPFv2Manager(BaseManager):
                 {
                     "device": device_name,
                     "branch": "edge.segments",
-                    "before": {"segments": before_segments},
-                    "after": {"segments": desired_segments},
+                    "before": redact_sensitive_for_log({"segments": before_segments}),
+                    "after": redact_sensitive_for_log({"segments": desired_segments}),
                 }
             )
 
@@ -992,8 +917,15 @@ class OSPFv2Manager(BaseManager):
         if not output_config:
             return result
 
+        LOG.info("[ospfv2] Validating payload for %d device(s)...", len(output_config))
+        try:
+            self.execute_concurrent_tasks(self.gsdk.show_validated_payload, output_config)
+        except Exception as e:
+            LOG.error("[ospfv2] SDK validation failed: %s", str(e))
+            raise ConfigurationError(f"OSPFv2 {operation} payload failed SDK schema validation: {str(e)}") from e
+
         LOG.info("[ospfv2] Pushing payload for %d device(s)...", len(output_config))
-        self.execute_concurrent_tasks(self._push_device_config_preserving_nulls, output_config)
+        self.execute_concurrent_tasks(self.gsdk.put_device_config_raw, output_config)
 
         result["changed"] = True
         return result

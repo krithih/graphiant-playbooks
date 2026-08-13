@@ -16,6 +16,8 @@ releases:
         - "``00_dataex_lan_segments_prerequisites.yml``, ``00_dataex_lan_interface_prerequisites.yml``, and ``00_dataex_vpn_profile_prerequisites.yml`` accept ``-e config_file=`` to override the default sample config"
         bugfixes:
         - "``graphiant_data_exchange``: fixed ``accept_invitation`` raising ``No VPN profiles found in acceptances`` for a Graphiant customer that legitimately needs no Site-to-Site VPN (issue #154)"
+        - "``graphiant_ospfv2``: ensure that the SDK model is used to build and validate the payload."
+        - "``graphiant_ospfv2``: BFD ``multiplier`` renamed to ``localMultiplier`` in ``sample_ospfv2.yaml`` and the interface payload to match the field name the API expects on write; the device GET response still stays the same; stopped sending the legacy flat fields when creating a new interface."
   "26.7.0":
     release_date: "2026-08-05"
     changes:

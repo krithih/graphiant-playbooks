@@ -25,6 +25,7 @@ _SENSITIVE_LOG_KEYS = frozenset(
         "psk",
         "cak",
         "md5Password",
+        "key",  # OSPFv2 MD5 authentication key (interface.authentication.authentication.key)
     }
 )
 

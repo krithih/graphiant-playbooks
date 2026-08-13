@@ -22,7 +22,7 @@ _VAULT_MD5 = {"edge-1": {"GigabitEthernet3": "vaultsecret"}}
 # _build_bfd -- no defaults filled in; only None/non-dict input raises.
 
 
-_BFD_FULL = {"enabled": True, "minimumInterval": 300, "multiplier": 3}
+_BFD_FULL = {"enabled": True, "minimumInterval": 300, "localMultiplier": 3}
 
 
 @pytest.mark.parametrize("bfd_cfg,expected", [
@@ -122,7 +122,6 @@ def test_build_interface_new_minimal_fills_all_defaults() -> None:
         "deadIntervalValue": {"deadInterval": 40},
         "retransmitIntervalValue": {"retransmitInterval": 5000},
         "bfd": {"bfd": {"enabled": False, "minimumInterval": None}},
-        "ifIndex": 0, "helloInterval": 0, "deadInterval": 0, "retransmitInterval": 0, "mtuIgnore": False,
     }}}
 
 
@@ -140,9 +139,6 @@ def test_build_interface_new_config_values_override_defaults_and_threads_vault()
     assert obj["retransmitIntervalValue"] == {"retransmitInterval": 999}
     assert obj["bfd"] == {"bfd": {"enabled": True, "minimumInterval": 300}}
     assert obj["authentication"] == {"authentication": {"keyId": 1, "key": "vaultsecret"}}
-    # Legacy flat fields are always zero/false on a new interface, regardless of config.
-    assert (obj["ifIndex"], obj["helloInterval"], obj["deadInterval"], obj["retransmitInterval"], obj["mtuIgnore"]) \
-        == (0, 0, 0, 0, False)
 
 
 # _build_area -- keyed by 'name'. 'existing_areas' (dict-keyed-by-name) decides new vs. existing,
@@ -172,7 +168,7 @@ def test_build_area_new_interfaces_are_all_new_and_thread_vault() -> None:
     _key, area_obj = OSPFv2Manager._build_area(area_cfg, {}, "edge-1", _VAULT_MD5)
     obj = area_obj["area"]["interfaces"]["GigabitEthernet3"]["interface"]
     # Full defaults (is_new=True shape) even though only interfaceName+auth were given.
-    assert obj["type"] == "point_to_point" and obj["ifIndex"] == 0
+    assert obj["type"] == "point_to_point"
     assert obj["helloIntervalValue"] == {"helloInterval": 10}
     assert obj["authentication"] == {"authentication": {"keyId": 1, "key": "vaultsecret"}}
 
@@ -211,7 +207,7 @@ def test_build_area_existing_interface_sparse_update_vs_new_interface_full_defau
         "helloIntervalValue": {"helloInterval": 99}, "interfaceName": "GigabitEthernet3",
     }
     new_if = interfaces["GigabitEthernet9"]["interface"]
-    assert new_if["type"] == "point_to_point" and new_if["ifIndex"] == 0 and new_if["mtuIgnore"] is False
+    assert new_if["type"] == "point_to_point"
 
 
 def test_build_area_existing_no_interfaces_given_key_omitted_not_forced_empty() -> None:
@@ -479,7 +475,7 @@ def test_build_deconfigure_payload_area_removal_ignores_sibling_fields() -> None
         "name": "CoreArea", "areaId": "0.0.0.0", "type": "normal",
         "interfaces": [{
             "interfaceName": "GigabitEthernet6/0/0",
-            "bfd": {"enabled": True, "minimumInterval": 1000, "multiplier": 3},
+            "bfd": {"enabled": True, "minimumInterval": 1000, "localMultiplier": 3},
             "authentication": {"keyId": 1, "key": "hello"},
         }],
     }]}
@@ -589,7 +585,7 @@ def test_extract_ospf_from_get_response_full_translation() -> None:
         "deadIntervalValue": {"deadInterval": 40},
         "retransmitIntervalValue": {"retransmitInterval": 5000},
         "authentication": {"authentication": {"keyId": 1, "key": "secret"}},
-        "bfd": {"bfd": {"enabled": True, "minimumInterval": 300, "multiplier": 3}},
+        "bfd": {"bfd": {"enabled": True, "minimumInterval": 300, "localMultiplier": 3}},
     }  # device-only fields (id/cost/ifIndex) have no equivalent and are dropped
     assert result["redistribution"] == {"bgp": {"protocol": {"type": "bgp", "metric": 1, "metricType": "type_2"}}}
 
@@ -910,12 +906,21 @@ def test_apply_ospf_configure_threads_vault_md5_password_for_new_interface() -> 
         }]},
     }]}}]}
     vault = {"edge-1-sdktest": {"GigabitEthernet3": "vaultsecret"}}
-    with patch.object(mgr, "render_config_file", return_value=cfg), patch.object(mgr, "execute_concurrent_tasks"):
+    with patch.object(mgr, "render_config_file", return_value=cfg), \
+            patch.object(mgr, "execute_concurrent_tasks") as mock_execute:
         result = mgr.apply_ospf("f.yaml", operation="configure", vault_ospf_md5_passwords=vault)
+
+    # diff_plan is display/facts output -- the MD5 key is redacted there, same as other secret fields.
     after_iface = result["diff_plan"][0]["after"]["segments"]["Documentation"]["ospfv2"]["process"]["areas"][
         "CoreArea"]["area"]["interfaces"]["GigabitEthernet3"]["interface"]
-    assert after_iface["authentication"] == {"authentication": {"keyId": 1, "key": "vaultsecret"}}
-    assert after_iface["type"] == "point_to_point" and after_iface["ifIndex"] == 0
+    assert after_iface["authentication"] == {"authentication": {"keyId": 1, "key": "********"}}
+    assert after_iface["type"] == "point_to_point"
+
+    # The vault key still has to reach the actual API push payload unredacted.
+    pushed_output_config = mock_execute.call_args[0][1]
+    pushed_iface = pushed_output_config[42]["payload"]["edge"]["segments"]["Documentation"]["ospfv2"]["process"][
+        "areas"]["CoreArea"]["area"]["interfaces"]["GigabitEthernet3"]["interface"]
+    assert pushed_iface["authentication"] == {"authentication": {"keyId": 1, "key": "vaultsecret"}}
 
 
 def test_apply_ospf_configure_raises_when_segment_or_interface_missing() -> None:
